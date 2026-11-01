@@ -42,6 +42,10 @@ def tcp_connect_check(host, timeout, port=80):
         sock.settimeout(timeout)
 
         # Connect to the host on the stated port
+        # I take only the first address getaddrinfo returns and never
+        # walk the rest. The socket is IPv4, so if the first result for
+        # a dual stack host is an IPv6 address the connect fails and I
+        # report the host as unreachable without trying its IPv4 entry.
         addr = socket.getaddrinfo(host, port)
         sock.connect(addr[0][4])  # Connect to the first address
 
@@ -128,6 +132,9 @@ def whois_lookup(host, timeout):
                 logging.info(f"WHOIS lookup successful for {host}")
                 return response_text
             except Exception as e:
+                 # A failed referral throws away the IANA answer I already
+                 # have in hand. The caller gets None and prints a plain
+                 # failure, with no hint that the first hop worked.
                  logging.error(f"Error querying authoritative WHOIS server: {e}")
                  return None
 
@@ -161,6 +168,9 @@ def http_get_request(host, timeout, port=80):
         str: The content of the response, or None if an error occurred.
     """
     try:
+        # The scheme is fixed to plain http whatever port is passed, so
+        # pointing this at 443 sends a cleartext request at a TLS port
+        # and the failure reads as a dead host rather than a wrong scheme.
         url = f"http://{host}:{port}"  # Assuming HTTP; consider HTTPS as well
         response = requests.get(url, timeout=timeout)
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
@@ -227,6 +237,9 @@ def main():
         logging.error("No operation selected.")
         sys.exit(1)
 
+    # Partial success exits 0. Only a run where every requested probe
+    # failed is an error exit, so a script chaining on the exit code
+    # cannot tell one success out of three from three out of three.
     if results and not any(results):
         logging.error("Every requested operation failed.")
         sys.exit(1)
