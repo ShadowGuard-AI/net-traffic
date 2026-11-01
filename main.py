@@ -12,10 +12,10 @@ def setup_argparse():
     """
     Sets up the argument parser for the command-line interface.
     """
-    parser = argparse.ArgumentParser(description="Monitor and analyze basic network traffic patterns.")
-    parser.add_argument("--host", help="The host to monitor (e.g., google.com)", type=str)
-    parser.add_argument("--port", help="The port to monitor (e.g., 80)", type=int)
-    parser.add_argument("--ping", help="Pings the host", action="store_true")
+    parser = argparse.ArgumentParser(description="Run one shot probes of a single named host: a TCP connect check, a WHOIS lookup, and an HTTP GET request.")
+    parser.add_argument("--host", help="The host to probe (e.g., google.com)", type=str)
+    parser.add_argument("--port", help="The port for the TCP connect check and the HTTP GET request (default: 80)", type=int, default=80)
+    parser.add_argument("--ping", help="Performs a TCP connect check on the host at the stated port (a TCP connection attempt, not an ICMP ping; the flag name is kept for compatibility)", action="store_true")
     parser.add_argument("--whois", help="Performs a WHOIS lookup on the host", action="store_true")
     parser.add_argument("--http-get", help="Performs a HTTP GET request", action="store_true")
     parser.add_argument("--timeout", help="Timeout for network operations in seconds (default: 5)", type=int, default=5)
@@ -23,40 +23,47 @@ def setup_argparse():
     return parser.parse_args()
 
 
-def ping_host(host, timeout):
+def tcp_connect_check(host, timeout, port=80):
     """
-    Pings a host to check its reachability.
+    Checks whether a TCP connection can be opened to a host on a port.
+    This is a TCP connect check: it sends no ICMP echo and no data.
 
     Args:
-        host (str): The host to ping.
+        host (str): The host to check.
         timeout (int): Timeout in seconds.
+        port (int): The port to connect to (default: 80).
 
     Returns:
-        bool: True if the host is reachable, False otherwise.
+        bool: True if the connection opened, False otherwise.
     """
     try:
         # Create a socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
 
-        # Connect to the host
-        addr = socket.getaddrinfo(host, 80)  # Using port 80 for ping
+        # Connect to the host on the stated port
+        addr = socket.getaddrinfo(host, port)
         sock.connect(addr[0][4])  # Connect to the first address
 
-        logging.info(f"Ping successful to {host}")
+        logging.info(f"TCP connect check successful to {host}:{port}")
         return True
     except socket.timeout:
-        logging.warning(f"Ping timeout to {host}")
+        logging.warning(f"TCP connect check timeout to {host}:{port}")
         return False
     except socket.gaierror as e:
         logging.error(f"Error resolving hostname {host}: {e}")
         return False
     except Exception as e:
-        logging.error(f"Error pinging {host}: {e}")
+        logging.error(f"Error in TCP connect check to {host}:{port}: {e}")
         return False
     finally:
         if 'sock' in locals():
             sock.close()
+
+
+def ping_host(host, timeout, port=80):
+    """Kept as an alias for tcp_connect_check for compatibility."""
+    return tcp_connect_check(host, timeout, port)
 
 
 def whois_lookup(host, timeout):
@@ -141,19 +148,20 @@ def whois_lookup(host, timeout):
             sock.close()
 
 
-def http_get_request(host, timeout):
+def http_get_request(host, timeout, port=80):
     """
     Performs an HTTP GET request to a given host.
 
     Args:
         host (str): The host to send the request to.
         timeout (int): Timeout in seconds.
+        port (int): The port to request (default: 80).
 
     Returns:
         str: The content of the response, or None if an error occurred.
     """
     try:
-        url = f"http://{host}"  # Assuming HTTP; consider HTTPS as well
+        url = f"http://{host}:{port}"  # Assuming HTTP; consider HTTPS as well
         response = requests.get(url, timeout=timeout)
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
@@ -184,33 +192,44 @@ def main():
 
     # Input validation: Host must be specified for most operations
     if not args.host and (args.ping or args.whois or args.http_get):
-        logging.error("Host must be specified for ping, whois, or http-get operations.")
+        logging.error("Host must be specified for the TCP connect check, whois, or http-get operations.")
         sys.exit(1)
 
+    port = args.port if args.port else 80
+    results = []
+
     if args.ping:
-        if ping_host(args.host, args.timeout):
-            print(f"Host {args.host} is reachable.")
+        ok = tcp_connect_check(args.host, args.timeout, port)
+        results.append(ok)
+        if ok:
+            print(f"Host {args.host} is reachable on port {port} (TCP connect check).")
         else:
-            print(f"Host {args.host} is not reachable.")
+            print(f"Host {args.host} is not reachable on port {port} (TCP connect check).")
 
     if args.whois:
         whois_info = whois_lookup(args.host, args.timeout)
+        results.append(whois_info is not None)
         if whois_info:
             print(whois_info)
         else:
             print(f"WHOIS lookup failed for {args.host}.")
 
     if args.http_get:
-        http_content = http_get_request(args.host, args.timeout)
+        http_content = http_get_request(args.host, args.timeout, port)
+        results.append(http_content is not None)
         if http_content:
             print(http_content[:500] + "..." if len(http_content) > 500 else http_content) # Print only the first 500 chars
         else:
             print(f"HTTP GET request failed for {args.host}.")
 
-# Example usage within main()
     if not any([args.ping, args.whois, args.http_get]):
         print("No operation specified.  Use --help for options.")
-        logging.info("No operation selected.  Displaying help message.")
+        logging.error("No operation selected.")
+        sys.exit(1)
+
+    if results and not any(results):
+        logging.error("Every requested operation failed.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
